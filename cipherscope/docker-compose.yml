@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Swap to Postgres by pointing this at the db service below:
+      # DATABASE_URL: postgresql+psycopg2://cipherscope:cipherscope@db:5432/cipherscope
+      DATABASE_URL: sqlite:///./cipherscope.db
+      SECRET_KEY: change-me-in-production
+    volumes:
+      - evidence_storage:/app/storage/evidence
+    # depends_on:
+    #   - db
+
+  # Uncomment when you're ready to move off SQLite (Phase 2+):
+  # db:
+  #   image: postgres:16
+  #   environment:
+  #     POSTGRES_USER: cipherscope
+  #     POSTGRES_PASSWORD: cipherscope
+  #     POSTGRES_DB: cipherscope
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+volumes:
+  evidence_storage:
+  # pgdata:
