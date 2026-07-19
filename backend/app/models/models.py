@@ -35,7 +35,7 @@ class Organization(Base):
 
     id = Column(String, primary_key=True, default=gen_uuid)
     name = Column(String, nullable=False, unique=True)
-    created_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
     users = relationship("User", back_populates="organization", cascade="all, delete-orphan")
     cases = relationship("Case", back_populates="organization", cascade="all, delete-orphan")
@@ -49,9 +49,9 @@ class User(Base):
     email = Column(String, nullable=False, unique=True, index=True)
     full_name = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
-    role = Column(Enum(UserRole), default=UserRole.investigator, nullable=False)
+    role = Column(Enum(UserRole, name="user_role"), default=UserRole.investigator, nullable=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
     organization = relationship("Organization", back_populates="users")
     cases_created = relationship("Case", back_populates="created_by")
@@ -68,8 +68,8 @@ class Case(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String, default="open")
-    created_at = Column(DateTime, default=utcnow)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     organization = relationship("Organization", back_populates="cases")
     created_by = relationship("User", back_populates="cases_created")
@@ -93,7 +93,7 @@ class Evidence(Base):
     sha256_hash = Column(String, nullable=False, index=True)
     md5_hash = Column(String, nullable=False, index=True)
 
-    status = Column(Enum(EvidenceStatus), default=EvidenceStatus.uploaded, nullable=False)
+    status = Column(Enum(EvidenceStatus, name="evidence_status"), default=EvidenceStatus.uploaded, nullable=False)
     processing_error = Column(Text, nullable=True)
 
     extracted_text = Column(Text, nullable=True)
@@ -102,8 +102,8 @@ class Evidence(Base):
 
     is_duplicate_of = Column(String, ForeignKey("evidence.id"), nullable=True)
 
-    uploaded_at = Column(DateTime, default=utcnow)
-    processed_at = Column(DateTime, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), default=utcnow)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
 
     case = relationship("Case", back_populates="evidence_items")
 
@@ -116,6 +116,6 @@ class AuditLog(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=True)
     action = Column(String, nullable=False)
     detail = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
     case = relationship("Case", back_populates="audit_logs")

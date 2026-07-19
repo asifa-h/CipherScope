@@ -1,5 +1,5 @@
-import shutil
-import uuid
+import os
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -10,7 +10,8 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.models import Case, Evidence, User, AuditLog, EvidenceStatus
 from app.schemas.schemas import EvidenceOut
-from app.services.evidence_processor import process_evidence
+from app.services.object_storage import evidence_object_key, object_storage
+from app.tasks.evidence import enqueue_evidence_processing
 
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
 
@@ -31,31 +32,33 @@ async def upload_evidence(
 ):
     case = _get_owned_case(db, case_id, user)
 
-    # Stream to disk with a size cap, real bytes on real filesystem.
-    case_dir = settings.STORAGE_DIR / case.id
-    case_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = f"{uuid.uuid4()}_{Path(file.filename).name}"
-    dest_path = case_dir / safe_name
-
+    original_filename = file.filename or "evidence"
+    object_key = evidence_object_key(case.id, original_filename)
     size = 0
-    with open(dest_path, "wb") as out_f:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > settings.MAX_UPLOAD_BYTES:
-                out_f.close()
-                dest_path.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="File exceeds max upload size")
-            out_f.write(chunk)
+    file_descriptor, temporary_name = tempfile.mkstemp(suffix=Path(original_filename).suffix)
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with temporary_path.open("wb") as temporary_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="File exceeds max upload size")
+                temporary_file.write(chunk)
 
-    if size == 0:
-        dest_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+            if size == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+            temporary_file.flush()
+        object_storage.upload_path(temporary_path, object_key, file.content_type)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
     evidence = Evidence(
         case_id=case.id,
         uploaded_by_id=user.id,
-        original_filename=file.filename,
-        stored_path=str(dest_path),
+        original_filename=original_filename,
+        stored_path=object_key,
         file_size_bytes=size,
         sha256_hash="pending",
         md5_hash="pending",
@@ -63,12 +66,20 @@ async def upload_evidence(
     )
     db.add(evidence)
     db.flush()
-    db.add(AuditLog(case_id=case.id, user_id=user.id, action="evidence_uploaded", detail=file.filename))
+    db.add(AuditLog(case_id=case.id, user_id=user.id, action="evidence_uploaded", detail=original_filename))
     db.commit()
     db.refresh(evidence)
 
-    # Real synchronous processing (Phase 1). Phase 2+: dispatch to a Celery worker instead.
-    evidence = process_evidence(db, evidence.id)
+    try:
+        enqueue_evidence_processing(evidence.id)
+    except Exception as exc:
+        # The upload is durable in MinIO, so callers can retry via the existing
+        # reprocess endpoint if Redis is temporarily unavailable.
+        evidence.status = EvidenceStatus.failed
+        evidence.processing_error = f"Unable to queue evidence processing: {exc}"
+        db.commit()
+
+    db.refresh(evidence)
     return evidence
 
 
@@ -93,4 +104,24 @@ def reprocess_evidence(case_id: str, evidence_id: str, db: Session = Depends(get
     ev = db.query(Evidence).filter(Evidence.id == evidence_id, Evidence.case_id == case.id).first()
     if not ev:
         raise HTTPException(status_code=404, detail="Evidence not found")
-    return process_evidence(db, ev.id)
+
+    ev.status = EvidenceStatus.uploaded
+    ev.processing_error = None
+    ev.processed_at = None
+    ev.sha256_hash = "pending"
+    ev.md5_hash = "pending"
+    ev.extracted_text = None
+    ev.extraction_method = None
+    ev.extraction_confidence = None
+    ev.is_duplicate_of = None
+    db.commit()
+
+    try:
+        enqueue_evidence_processing(ev.id)
+    except Exception as exc:
+        ev.status = EvidenceStatus.failed
+        ev.processing_error = f"Unable to queue evidence processing: {exc}"
+        db.commit()
+
+    db.refresh(ev)
+    return ev

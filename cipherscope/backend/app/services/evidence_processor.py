@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.models import Evidence, EvidenceStatus
+from app.services.object_storage import object_storage
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
 PDF_EXTENSIONS = {".pdf"}
@@ -81,43 +82,43 @@ def process_evidence(db: Session, evidence_id: str) -> Evidence:
     if not evidence:
         raise ValueError(f"Evidence {evidence_id} not found")
 
-    file_path = Path(evidence.stored_path)
     evidence.status = EvidenceStatus.processing
     db.commit()
 
     try:
-        sha256_hash, md5_hash = compute_hashes(file_path)
-        evidence.sha256_hash = sha256_hash
-        evidence.md5_hash = md5_hash
-        evidence.file_size_bytes = file_path.stat().st_size
+        with object_storage.materialize(evidence.stored_path) as file_path:
+            sha256_hash, md5_hash = compute_hashes(file_path)
+            evidence.sha256_hash = sha256_hash
+            evidence.md5_hash = md5_hash
+            evidence.file_size_bytes = file_path.stat().st_size
 
-        mime_type, _ = mimetypes.guess_type(str(file_path))
-        evidence.mime_type = mime_type
-        evidence.file_extension = file_path.suffix.lower()
+            mime_type, _ = mimetypes.guess_type(str(file_path))
+            evidence.mime_type = mime_type
+            evidence.file_extension = file_path.suffix.lower()
 
-        dup_id = find_duplicate(db, evidence.case_id, sha256_hash, evidence.id)
-        evidence.is_duplicate_of = dup_id
+            dup_id = find_duplicate(db, evidence.case_id, sha256_hash, evidence.id)
+            evidence.is_duplicate_of = dup_id
 
-        ext = file_path.suffix.lower()
-        text, method, confidence = None, None, None
+            ext = file_path.suffix.lower()
+            text, method, confidence = None, None, None
 
-        if ext in IMAGE_EXTENSIONS:
-            text, confidence = extract_text_from_image(file_path)
-            method = "ocr_tesseract"
-        elif ext in PDF_EXTENSIONS:
-            text, method = extract_text_from_pdf(file_path)
-        elif ext in PLAIN_TEXT_EXTENSIONS:
-            text = extract_text_from_plain(file_path)
-            method = "plain_text_read"
-        else:
-            method = "unsupported_for_text_extraction_in_phase1"
+            if ext in IMAGE_EXTENSIONS:
+                text, confidence = extract_text_from_image(file_path)
+                method = "ocr_tesseract"
+            elif ext in PDF_EXTENSIONS:
+                text, method = extract_text_from_pdf(file_path)
+            elif ext in PLAIN_TEXT_EXTENSIONS:
+                text = extract_text_from_plain(file_path)
+                method = "plain_text_read"
+            else:
+                method = "unsupported_for_text_extraction_in_phase1"
 
-        evidence.extracted_text = text
-        evidence.extraction_method = method
-        evidence.extraction_confidence = confidence
-        evidence.status = EvidenceStatus.processed
-        evidence.processed_at = datetime.now(timezone.utc)
-        evidence.processing_error = None
+            evidence.extracted_text = text
+            evidence.extraction_method = method
+            evidence.extraction_confidence = confidence
+            evidence.status = EvidenceStatus.processed
+            evidence.processed_at = datetime.now(timezone.utc)
+            evidence.processing_error = None
 
     except Exception as e:
         evidence.status = EvidenceStatus.failed

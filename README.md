@@ -15,13 +15,14 @@ extraction. Nothing is simulated.
 
 - **Auth**: organization registration + JWT login (bcrypt-hashed passwords)
 - **Cases**: create/list investigations, scoped per organization
-- **Evidence upload**: streamed to disk, size-capped
+- **Evidence upload**: streamed to MinIO S3-compatible object storage, size-capped
 - **Real SHA256 + MD5 hashing** of every uploaded file
 - **Real OCR** on images via Tesseract (`pytesseract`), with per-file confidence score
 - **Real PDF text-layer extraction** via `pypdf`
 - **Plain text file reading** for `.txt` / `.csv` / `.log`
 - **Duplicate detection** by SHA256 within a case
 - **Audit log** table recording case/evidence events
+- **Celery + Redis processing**: hashes, metadata, duplicate detection, and OCR/PDF extraction run in a worker
 - **Automated tests** (`pytest`) covering the whole pipeline, including
   cross-organization data isolation
 - A frontend that talks to the real API — no mock data anywhere
@@ -40,16 +41,27 @@ Phase 2+" below).
 
 ### Option A — Docker (recommended)
 ```bash
-docker compose up --build
+cp .env.example .env
+# Replace every placeholder in .env before using this outside local development.
+docker compose up --build -d
 ```
-API will be live at `http://localhost:8000`. Open `frontend/index.html`
-directly in your browser (it talks to `http://localhost:8000` by default).
+The API will be live at `http://localhost:8000`. Docker Compose starts
+PostgreSQL, Redis, MinIO, the one-shot Alembic migration service, the API, and
+a Celery worker. Data is held in the `postgres_data`, `redis_data`, and
+`minio_data` Docker volumes; only the API port is published.
+
+Open `frontend/index.html` directly in your browser (it talks to
+`http://localhost:8000` by default).
 
 ### Option B — Manual
 ```bash
 cd backend
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# Set DATABASE_URL, S3_*, and CELERY_* for your PostgreSQL, S3-compatible
+# store, and Redis instance, then create the schema:
+alembic upgrade head
 
 # Tesseract is required for OCR — install the system binary:
 #   macOS:  brew install tesseract
@@ -66,6 +78,10 @@ cd backend
 pip install pytest httpx
 pytest -v
 ```
+The test suite deliberately uses isolated SQLite/filesystem adapters and eager
+Celery execution so it can verify the unchanged Phase 1 outcomes without
+external services. The Docker deployment always uses PostgreSQL, MinIO, and
+Redis.
 
 ## API quick reference
 
@@ -84,14 +100,26 @@ pytest -v
 
 Interactive docs (Swagger) are auto-generated at `http://localhost:8000/docs`.
 
-## Switching from SQLite to Postgres
+## Production infrastructure and SQLite migration
 
-Phase 1 defaults to SQLite for zero-setup local dev. To move to Postgres,
-uncomment the `db` service in `docker-compose.yml` and set:
-```
-DATABASE_URL=postgresql+psycopg2://cipherscope:cipherscope@db:5432/cipherscope
-```
-No application code changes needed — SQLAlchemy handles the dialect switch.
+The application now defaults to PostgreSQL and creates its schema exclusively
+through Alembic. `Base.metadata.create_all()` is no longer run by the API.
+The initial migration is at
+`backend/alembic/versions/20260719_0001_initial_schema.py`.
+
+For an existing Phase 1 SQLite deployment, take a backup first, start the new
+stack so PostgreSQL and the MinIO bucket are ready, and run `alembic upgrade
+head`. Then run `backend/scripts/migrate_sqlite_to_postgres.py` with the legacy
+SQLite SQLAlchemy URL. The script copies organizations, users, cases, evidence,
+and audit records in dependency order, uploads each referenced evidence file to
+the configured MinIO bucket, and refuses a non-empty target database. The
+legacy evidence directory must be available at the paths recorded in SQLite.
+
+All existing endpoint paths and request/response models are unchanged. Upload
+and reprocess calls now enqueue work and return the same `EvidenceOut` shape;
+the pre-existing `status` field progresses from `uploaded` to `processing` to
+`processed` (or `failed`). Use the existing evidence GET endpoints to observe
+completion.
 
 ## Extending to Phase 2+ (per your roadmap)
 
@@ -104,11 +132,9 @@ The codebase is deliberately modular so each phase is additive:
 - **Phase 3 (Timeline, Knowledge Graph)**: add `Entity` and `Relationship`
   tables (or a Neo4j sidecar) populated by an NER pass over `extracted_text`;
   a `timeline.py` service that orders evidence + extracted dates.
-- **Phase 4 (Video/Audio AI)**: these are compute-heavy — move
-  `process_evidence()` into a **Celery task** (Redis already sketched in
-  `docker-compose.yml` comments) so uploads return immediately and processing
-  happens in a worker. This is the one real architectural change Phase 1 was
-  built to accommodate without a rewrite.
+- **Phase 4 (Video/Audio AI)**: these are compute-heavy, but the Celery worker
+  and Redis queue are already in place. Add new processors to the existing
+  evidence task without changing the API contract.
 - **Phase 5 (Reports, Audit, Roles)**: `AuditLog` and `UserRole` already
   exist in the schema — a report generator just needs to query and render
   them (the `docx`/`pdf` skills in this environment can generate the actual

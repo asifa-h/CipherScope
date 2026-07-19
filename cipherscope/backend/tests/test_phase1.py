@@ -5,15 +5,30 @@ Run with:  pytest -v   (from the backend/ directory)
 import hashlib
 import io
 import os
+import shutil
+from pathlib import Path
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_cipherscope.db"
+os.environ["OBJECT_STORAGE_BACKEND"] = "filesystem"
+os.environ["LOCAL_STORAGE_DIR"] = "./test_evidence_storage"
+os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 
+from app.core.database import engine
 from app.main import app
 
 client = TestClient(app)
+
+
+def setup_module(module):
+    Path("test_cipherscope.db").unlink(missing_ok=True)
+    shutil.rmtree("test_evidence_storage", ignore_errors=True)
+    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    command.upgrade(alembic_config, "head")
 
 
 @pytest.fixture(scope="module")
@@ -112,6 +127,6 @@ def test_cross_org_case_isolation(auth_headers):
 
 
 def teardown_module(module):
-    for f in ["test_cipherscope.db"]:
-        if os.path.exists(f):
-            os.remove(f)
+    engine.dispose()
+    Path("test_cipherscope.db").unlink(missing_ok=True)
+    shutil.rmtree("test_evidence_storage", ignore_errors=True)

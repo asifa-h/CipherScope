@@ -1,8 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.database import Base, engine
-from app.models import models  # noqa: F401 (registers models on Base metadata)
 from app.routers import auth, cases, evidence
 
 app = FastAPI(
@@ -18,8 +16,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-Base.metadata.create_all(bind=engine)
 
 app.include_router(auth.router)
 app.include_router(cases.router)
