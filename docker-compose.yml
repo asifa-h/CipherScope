@@ -44,24 +44,22 @@ services:
   minio-init:
     image: minio/mc:latest
     restart: "no"
+
     depends_on:
       minio:
         condition: service_healthy
+
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cipherscope-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cipherscope-minio-change-me}
       S3_BUCKET: ${S3_BUCKET:-cipherscope-evidence}
-    entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      until mc alias set cipherscope http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" && mc ready cipherscope; do
-        echo "Waiting for MinIO to become ready..."
-        sleep 2
-      done
-      until mc mb --ignore-existing "cipherscope/$$S3_BUCKET" && mc stat "cipherscope/$$S3_BUCKET" >/dev/null; do
-        echo "Waiting to create and verify bucket $$S3_BUCKET..."
-        sleep 2
-      done
-      echo "MinIO bucket $$S3_BUCKET is ready."
+
+    volumes:
+      - ./backend/scripts/init-minio.sh:/init-minio.sh:ro
+
+    entrypoint:
+      - /bin/sh
+      - /init-minio.sh    
 
   migrate:
     build: ./backend
@@ -92,8 +90,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      minio-init:
-        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -109,8 +105,6 @@ services:
     environment: *backend_environment
     depends_on:
       migrate:
-        condition: service_completed_successfully
-      minio-init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
